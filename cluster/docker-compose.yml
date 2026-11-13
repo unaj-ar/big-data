@@ -1,0 +1,89 @@
+# Cluster virtual de 3 nodos: master + worker1 + worker2 (HDFS + Spark standalone).
+# Portable: funciona en cualquier Linux (amd64/arm64) con Docker + Compose v2.
+# Parámetros en cluster/.env (ver .env.example). Kafka solo con el profile "streaming" (Tema 4):
+#   docker compose up -d                       -> cluster HDFS + Spark
+#   docker compose --profile streaming up -d   -> cluster + Kafka
+name: awid-bigdata
+
+x-node: &node
+  build: .
+  image: awid-hadoop-spark:latest
+  networks: [bigdata]
+  restart: unless-stopped
+
+x-worker-env: &worker-env
+  NODE_ROLE: worker
+  SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+  SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-1536m}
+
+services:
+  master:
+    <<: *node
+    hostname: master
+    container_name: master
+    environment:
+      NODE_ROLE: master
+    ports:
+      - "${PORT_HDFS_UI:-9870}:9870"     # HDFS NameNode UI
+      - "${PORT_SPARK_UI:-8080}:8080"    # Spark Master UI
+      - "${PORT_APP_UI:-4040}:4040"      # Spark application UI (driver)
+      - "${PORT_HISTORY:-18080}:18080"   # Spark History Server
+    volumes:
+      - namenode:/hadoop/dfs/name
+      - ${AWID_DATA_DIR:-../AWID/csv}:/data/awid:ro   # dataset en el host (solo lectura)
+      - ../jobs:/opt/work/jobs
+      - ../streaming:/opt/work/streaming
+      - ../scripts:/opt/work/scripts
+      - ../output:/opt/work/output
+    mem_limit: ${NODE_MEM_LIMIT:-2g}
+
+  worker1:
+    <<: *node
+    hostname: worker1
+    container_name: worker1
+    environment: *worker-env
+    volumes:
+      - datanode1:/hadoop/dfs/data
+    depends_on: [master]
+    mem_limit: ${NODE_MEM_LIMIT:-2g}
+
+  worker2:
+    <<: *node
+    hostname: worker2
+    container_name: worker2
+    environment: *worker-env
+    volumes:
+      - datanode2:/hadoop/dfs/data
+    depends_on: [master]
+    mem_limit: ${NODE_MEM_LIMIT:-2g}
+
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    container_name: kafka
+    profiles: [streaming]
+    networks: [bigdata]
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
+    mem_limit: 1g
+
+volumes:
+  namenode:
+  datanode1:
+  datanode2:
+
+networks:
+  bigdata:
+    driver: bridge
